@@ -33,7 +33,7 @@ def create_model(input_dim, hidden_units, activation='relu', out_units=1, out_ac
 
     return model
 
-def passive_sampling(model, X_unlabelled, n_samples):
+def passive_sampling(model, X_unlabelled, n_targets, n_samples):
     selected_indices = np.random.choice(
         X_unlabelled.shape[0],
         size=n_samples,
@@ -41,12 +41,92 @@ def passive_sampling(model, X_unlabelled, n_samples):
     )
     return selected_indices
 
-def uncertainty_sampling(model, X_unlabelled, n_samples):
+def uncertainty_sampling(model, X_unlabelled, n_targets, n_samples):
     probabilities = model.predict(
         X_unlabelled,
         verbose=0
-    ).ravel()
-    selected_indices = np.argsort(np.abs(probabilities - 0.5))[:n_samples]
+    )
+    selected_indices = None
+    if targets == 1:
+        probabilities = probabilities.ravel()
+        uncertainty = np.abs(probabilities - 0.5)
+        selected_indices = np.argsort(uncertainty)[:n_samples]
+    else:
+        entropy = -np.sum(
+            probabilities * np.log(probabilities + 1e-12),
+            axis=1
+        )
+        selected_indices = np.argsort(-entropy)[:n_samples]
+    return selected_indices
+
+# def sasla_sampling(model, X_pool, n_targets, n_samples):
+#     S = np.zeros(shape=X_pool.shape[0])
+#     probabilities = model.predict(
+#         X_pool,
+#         verbose=0
+#     )
+#     hidden_model = tf.keras.Model(
+#         inputs=model.input,
+#         outputs=model.layers[0].output
+#     )
+    
+#     hidden_values = hidden_model(X_pool, training=False).numpy()
+    
+#     weights = model.get_weights()
+#     hidden_weights = weights[0]
+#     output_weights = weights[2]
+    
+#     for p in range(X_pool.shape[0]):
+#         # x_p = X_pool[p]
+#         S_p = np.zeros(shape=(n_targets, X_pool.shape[1]))
+#         for k in range(n_targets):
+#             o_pk = probabilities[p, k]
+#             odds = o_pk * (1 - o_pk)
+
+#             # S_pk = np.zeros(X_pool.shape[1])
+#             for i in range(X_pool.shape[1]):
+#                 total = 0
+#                 for j in range(hidden_weights.shape[1]):
+#                     h_j = hidden_values[p, j]
+#                     w_kj = output_weights[j, k]
+#                     w_ji = hidden_weights[i, j]
+#                     total += w_kj * w_ji * (1 - h_j) * h_j
+
+#                 S_p[k, i] = odds * total
+#         S[p] = np.max(S_p)
+
+#     selected_indices = np.argsort(-S)[:n_samples]
+#     return selected_indices
+
+def sasla_sampling(model, X_pool, n_targets, n_samples):
+    # Model outputs
+    probabilities = model(X_pool, training=False).numpy()
+
+    # Hidden-layer outputs
+    hidden_model = tf.keras.Model(
+        inputs=model.input,
+        outputs=model.layers[0].output
+    )
+    hidden_values = hidden_model(X_pool, training=False).numpy()
+
+    # Weights
+    weights = model.get_weights()
+    hidden_weights = weights[0]    
+    output_weights = weights[2]    
+
+    hidden_derivative = hidden_values * (1 - hidden_values)
+    total = np.einsum(
+        'pj,jk,ij->pki',
+        hidden_derivative,
+        output_weights,
+        hidden_weights
+    )
+
+    output_derivative = probabilities * (1 - probabilities)
+    S = total * output_derivative[:, :, np.newaxis]
+    S = np.max(S, axis=(1, 2))
+
+    selected_indices = np.argsort(-S)[:n_samples]
     return selected_indices
 
 def label_data(selected_indices, labelled, unlabelled):
@@ -58,7 +138,6 @@ def label_data(selected_indices, labelled, unlabelled):
     )
 
     return new_labelled, new_unlabelled
-
 
 def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, unlab_size=0.9, random_state=100, verbose=False,
                        hidden_units=32, activation='relu', balanced=False,
@@ -77,6 +156,7 @@ def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
 
     input_dim = X_pool.shape[1]
     n_samples = len(idx_unlabelled) // (num_iter-1)
+    epochs = 200 // num_iter
     
     history = []
     for i in range(num_iter):
@@ -101,7 +181,7 @@ def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
         
         # train model on labelled data
         fit_kwargs = {
-            "epochs": 200,
+            "epochs": epochs,
             "batch_size": 32,
             "validation_split": 0.15,
             "callbacks": [early_stopping],
@@ -135,7 +215,7 @@ def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
 
         # determine instances that should be labelled
         if i < num_iter - 1:
-            selected_indices = sampling(model, X_unlabelled, n_samples)
+            selected_indices = sampling(model, X_unlabelled, 1, n_samples)
             idx_labelled, idx_unlabelled = label_data(selected_indices, idx_labelled, idx_unlabelled)
 
     return history
@@ -157,6 +237,7 @@ def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
 
     input_dim = X_pool.shape[1]
     n_samples = len(idx_unlabelled) // (num_iter-1)
+    epochs = 200 // num_iter
     
     history = []
     for i in range(num_iter):
@@ -185,7 +266,7 @@ def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
 
         # train model on labelled data
         fit_kwargs = {
-            "epochs": 200,
+            "epochs": epochs,
             "batch_size": 32,
             "validation_split": 0.15,
             "callbacks": [early_stopping],
@@ -225,34 +306,25 @@ def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
 
         # determine instances that should be labelled
         if i < num_iter - 1:
-            selected_indices = sampling(model, X_unlabelled, n_samples)
+            selected_indices = sampling(model, X_unlabelled, out_units, n_samples)
             idx_labelled, idx_unlabelled = label_data(selected_indices, idx_labelled, idx_unlabelled)
 
     return history
 
-def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, unlab_size=0.9, random_state=100, verbose=False,
-                       hidden_units=32, activation='relu',
-                       learning_rate=0.001, momentum=0.9, weight_decay=0, loss='mse', 
+def sasla_bc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random_state=100, verbose=False,
+                       hidden_units=32, activation='relu', balanced=False,
+                       learning_rate=0.001, momentum=0.9, weight_decay=0, loss='binary_crossentropy', 
                        ):
     indices = np.arange(len(X_pool))
-    # X_labelled, X_unlabelled, y_labelled, y_unlabelled, \
-    idx_labelled, idx_unlabelled = train_test_split(
-        X_pool,
-        y_pool,
-        indices,
-        test_size=unlab_size,
-        stratify=y_pool,
-        random_state=random_state
-    )
+    idx_labelled = indices.copy()
 
     input_dim = X_pool.shape[1]
-    n_samples = len(idx_unlabelled) // (num_iter-1)
-
-    
+    n_samples = X_pool.shape[0]
+    n_reduce = n_samples * unlab // (num_iter-1)
+    excess = n_samples * unlab - n_reduce * (num_iter-1)
+    epochs = 200 // num_iter
     history = []
     for i in range(num_iter):
-        if i == num_iter - 2:
-            n_samples = idx_unlabelled.shape[0]
 
         # update pool of labelled data
         X_labelled = X_pool[idx_labelled]
@@ -269,37 +341,135 @@ def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, u
             patience=5,
             restore_best_weights=True
         )
-
+        
         # train model on labelled data
+        fit_kwargs = {
+            "epochs": epochs,
+            "batch_size": 32,
+            "validation_split": 0.15,
+            "callbacks": [early_stopping],
+            "verbose": 0
+        }
+        if balanced:
+            fit_kwargs["class_weight"] = balanced_weights(
+                y_train_split
+            )
+            
         model.fit(
-            X_labelled,
-            y_labelled,
-            epochs=200,
-            batch_size=32,
-            validation_split=0.15,
-            callbacks=[early_stopping],
-            verbose=0
+            X_train_split,
+            y_train_split,
+            **fit_kwargs
         )
 
          # Evaluate
-        y_pred = model(X_val_split, training=False).numpy().ravel()
-            
-        rmse = root_mean_squared_error(y_val_split, y_pred)
-        mape = mean_absolute_percentage_error(y_val_split, y_pred)
-        r2 = r2_score(y_val_split, y_pred)
+        y_prob = model.predict(X_test, verbose=0).ravel()
+        y_pred = (y_prob >= 0.5).astype(int)
+        acc = accuracy_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred, average='macro')
+        auc = roc_auc_score(y_test, y_prob)
 
         if verbose:
             print(f"Iteration {i+1}: {idx_labelled.shape[0]} labelled instances\n"
-                  f"\tRMSE = {rmse}\n"
-                  f"\tMAPE = {mape}\n"
-                  f"\tR^2 = {r2}\n"
+                  f"\tAccuracy = {acc}\n"
+                  f"\tmacro F1 = {f1}\n"
+                  f"\tAUC = {auc}\n"
             )
-        history.append({'Labelled': idx_labelled.shape[0], 'rmse': rmse, 'mape': mape, 'R_squared': r2})
+        history.append({'Labelled': idx_labelled.shape[0], 'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc})
 
         # determine instances that should be labelled
-        if i < num_iter - 1:
-            selected_indices = sampling(model, X_unlabelled, n_samples)
-            idx_labelled, idx_unlabelled = label_data(selected_indices, idx_labelled, idx_unlabelled)
+        selected_indices = sasla_sampling(model, X_pool, 1, n_samples)
+        idx_labelled, idx_unlabelled = label_data(selected_indices, idx_labelled, idx_unlabelled)
+
+        n_samples -= n_reduce
+        if i == 0:
+            n_samples -= excess
+
+    return history
+
+def sasla_mc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random_state=100, verbose=False,
+                       hidden_units=32, activation='relu', out_units=3, out_act='softmax', balanced=False, 
+                       learning_rate=0.001, momentum=0.9, weight_decay=0, loss='sparse_categorical_crossentropy', 
+                       ):
+    indices = np.arange(len(X_pool))
+    idx_labelled = indices.copy()
+
+    input_dim = X_pool.shape[1]
+    n_samples = X_pool.shape[0]
+    n_reduce = n_samples * unlab // (num_iter-1)
+    excess = n_samples * unlab - n_reduce * (num_iter-1)
+    epochs = 200 // num_iter
+    history = []
+    for i in range(num_iter):
+        if i == num_iter - 2:
+            n_samples = idx_unlabelled.shape[0]
+
+        # update pool of labelled data
+        # X_labelled = X_pool.iloc[idx_labelled]
+        # y_labelled = y_pool.iloc[idx_labelled]
+        # X_unlabelled = X_pool.iloc[idx_unlabelled]
+        # y_unlabelled = y_pool.iloc[idx_unlabelled]
+        X_labelled = X_pool[idx_labelled]
+        y_labelled = y_pool[idx_labelled]
+        X_unlabelled = X_pool[idx_unlabelled]
+        y_unlabelled = y_pool[idx_unlabelled]
+
+        # compile model
+        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, out_units=out_units, out_act=out_act, 
+                             learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
+
+        early_stopping = tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss",
+            patience=5,
+            restore_best_weights=True
+        )
+
+        # train model on labelled data
+        fit_kwargs = {
+            "epochs": epochs,
+            "batch_size": 32,
+            "validation_split": 0.15,
+            "callbacks": [early_stopping],
+            "verbose": 0
+        }
+        if balanced:
+            fit_kwargs["class_weight"] = balanced_weights(
+                y_train_split
+            )
+            
+        model.fit(
+            X_train_split,
+            y_train_split,
+            **fit_kwargs
+        )
+
+         # Evaluate
+        y_prob = model.predict(X_test, verbose=0)
+        y_pred = np.argmax(y_prob, axis=1)
+        
+        acc = accuracy_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred, average='macro')
+        auc = roc_auc_score(
+            y_test,
+            y_prob,
+            multi_class="ovr",
+            average="macro"
+        )
+
+        if verbose:
+            print(f"Iteration {i+1}: {idx_labelled.shape[0]} labelled instances\n"
+                  f"\tAccuracy = {acc}\n"
+                  f"\tmacro F1 = {f1}\n"
+                  f"\tAUC = {auc}\n"
+            )
+        history.append({'Labelled': idx_labelled.shape[0], 'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc})
+
+        # determine instances that should be labelled
+        selected_indices = sasla_sampling(model, X_pool, out_units, n_samples)
+        idx_labelled, idx_unlabelled = label_data(selected_indices, idx_labelled, idx_unlabelled)
+
+        n_samples -= n_reduce
+        if i == 0:
+            n_samples -= excess
 
     return history
 
@@ -490,7 +660,6 @@ def retrieve_params(file='params.json'):
     with open(file, "r") as f:
         return json.load(f)
 
-
 def cv_classification(X_train, y_train, out_units=1, out_act='sigmoid', loss="binary_crossentropy", k=5, random_state=42, 
                   hidden_units=32, activation='relu', alpha=0, 
                   learning_rate=0.01, momentum=0, weight_decay=0, balanced=False):
@@ -525,7 +694,7 @@ def cv_classification(X_train, y_train, out_units=1, out_act='sigmoid', loss="bi
             model_layers.append(layers.LeakyReLU(negative_slope=alpha))
 
         elif activation == "elu":
-            model_layers.append(layers.Dense(hidden_unit))
+            model_layers.append(layers.Dense(hidden_units))
             model_layers.append(layers.ELU(alpha=alpha))
 
         else:
@@ -570,13 +739,13 @@ def cv_classification(X_train, y_train, out_units=1, out_act='sigmoid', loss="bi
         if out_units == 1:
             y_prob = model(X_val_split, training=False).numpy().ravel()
             y_pred = (y_prob >= 0.5).astype(int)
-            auc = roc_auc_score(y_test, y_prob)
+            auc = roc_auc_score(y_val_split, y_prob)
             score['auc'] = auc
         else:
             y_prob = model(X_val_split, training=False).numpy()
             y_pred = np.argmax(y_prob, axis=1)
             auc = roc_auc_score(
-                y_test,
+                y_val_split,
                 y_prob,
                 multi_class="ovr",
                 average="macro"
@@ -589,93 +758,7 @@ def cv_classification(X_train, y_train, out_units=1, out_act='sigmoid', loss="bi
         score['f1'] = f1
         scores.append(score)
     
-    avg_scores = {
-        metric: np.mean([score[metric] for score in scores])
-        for metric in scores[0]
-    }
-    return avg_score
-
-
-def cv_regression(X_train, y_train, out_units=1, out_act='linear', loss="mse", k=5, random_state=42, 
-                  hidden_units=32, activation='relu', alpha=0, 
-                  learning_rate=0.01, momentum=0, weight_decay=0):
-
-    y_pred = None
-    
-    cv = StratifiedKFold(
-        n_splits=k,
-        shuffle=True,
-        random_state=random_state
-    )
-    scaler = StandardScaler()
-    scores = []
-    
-    for train_idx, val_idx in cv.split(X_train, y_train):
-        tf.keras.backend.clear_session()
-        
-        X_train_split = X_train[train_idx]
-        X_train_split = scaler.fit_transform(X_train_split)
-        X_val_split = X_train[val_idx]
-        X_val_split = scaler.transform(X_val_split)
-
-        y_train_split = y_train[train_idx]
-        y_val_split = y_train[val_idx]
-
-        model_layers = [
-            layers.Input(shape=(X_train.shape[1],))
-        ]
-
-        if activation == "leaky_relu":
-            model_layers.append(layers.Dense(hidden_units))
-            model_layers.append(layers.LeakyReLU(negative_slope=alpha))
-
-        elif activation == "elu":
-            model_layers.append(layers.Dense(hidden_unit))
-            model_layers.append(layers.ELU(alpha=alpha))
-
-        else:
-            model_layers.append(layers.Dense(hidden_units, activation=activation))
-
-        model_layers.append(layers.Dense(out_units, activation=out_act))
-        model = tf.keras.Sequential(model_layers)
-    
-        model.compile(
-            optimizer=tf.keras.optimizers.SGD(
-                learning_rate=learning_rate,
-                momentum=momentum,
-                weight_decay=weight_decay
-            ),
-            loss=loss
-        )
-
-        es = tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=5,
-            restore_best_weights=True
-        )
-        fit_kwargs = {
-            "epochs": 75,
-            "batch_size": 32,
-            "validation_split": 0.15,
-            "callbacks": [es],
-            "verbose": 0
-        }
-            
-        model.fit(
-            X_train_split,
-            y_train_split,
-            **fit_kwargs
-        )
-
-
-        y_pred = model(X_val_split, training=False).numpy().ravel()
-            
-        rmse = root_mean_squared_error(y_val_split, y_pred)
-        mape = mean_absolute_percentage_error(y_val_split, y_pred)
-        r2 = r2_score(y_val_split, y_pred)
-        scores.append({'rmse': rmse, 'mape': mape, 'R_squared': r2})
-    
-    avg_scores = {
+    avg_score = {
         metric: np.mean([score[metric] for score in scores])
         for metric in scores[0]
     }
