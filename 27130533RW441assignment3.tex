@@ -6,12 +6,12 @@
 \usepackage{graphicx}
 \usepackage{textcomp}
 \usepackage{xcolor}
-\usepackage{graphicx}
 \usepackage{tikz}
 \usepackage{booktabs}
 \usepackage{float}
 \usepackage[ruled]{algorithm2e}
-\usepackage{algorithmic}%needed for pseudo code
+%\usepackage{algorithm}
+%\usepackage{algorithmic}%needed for pseudo code
 %\usepackage{algpseudocode}
 \usepackage{url}
 \usepackage{tabularx}
@@ -22,8 +22,7 @@
 
 \begin{document}
 	
-	\title{Comparison between passive and active learning feed-forward neural networks for binary classification\\
-	}
+	\title{Comparison of passive learning and active learning using uncertainty sampling and sensitivity analysis selective learning for feed-forward neural networks}
 	
 	\author{\IEEEauthorblockN{ D.A. Nieuwoudt}
 		\IEEEauthorblockA{\textit{Computer Science, Stellenbosch University} \\
@@ -43,12 +42,81 @@
 		%	\end{IEEEkeywords}
 	
 	\section{Introduction}
-	
+	This study tests how the performance of feed-forward neural networks (NN) change when employing active learning compared to passive learning.
 	
 	\section{Background}
+	A feed-forward NN consists f multiple layers of percetrons, where the layers between the input and output layers are the hidden layers. A single perceptron consists of input nodes and weights, and these input values with weights are combined (weighted summation or product) and then an activation function is applied to the result to produce a single output. To produce multiple outputs (for multiclass classification for example), multiple single perceptrons (one for each output) are stacked parallel to each other. These perceptrons have the same input nodes, and activation functions, but each perceptron has separate weights. A feed-forward NN is a multilayer perceptron and uses weighted summation perceptrons. A multilayer perceptron contains more than one layer of multiple perceptrons, where the outputs of the current layer are used as the inputs of the next layer.
 	
+	NNs can only handle numerical inputs since the hidden layers are linear combinations of the input values. NNs also cannot handle missing valuesa, and are sensitive to noisy data. In theory NNs are robust to features with different scales, because the weights can be scaled for each feature accordingly. In practice, though, the weights are all initialised in similar ranges and if the optimisation algorithm finds a local minimum, features with larger scales can have too much influence on the output. NNs are also prone to overfitting because these models are very flexible and have many parameters.
+	
+	\subsection{Stochastic Gradient Descent}
+	
+	NNs have large amounts of amounts of weight parameters to estimate because of the interconnected multi-unit layers of linear units. Estimating these parameters is an optimisation problem that requires sophisticated approaches to estimate all the parameters simultaneously. There are several optimisation algorithms that have been used to estimate the parameters of NN models, such as batch gradient descent, stochastic gradient descent (SGD), conjugate gradient descent, and even metaheuristics. In this study, SGD is used across all models for consistency. SGD, as described in Algorithm~\ref{alg:sgd}, has two phases and updates the weights after each training instance passes though both phases. The first phase is a feedforward phase, during which, the error signal of every output and hidden unit is determined for a specific instance. The second phase, backpropogation, uses these error signals to update the weights.
+	
+	\begin{algorithm}
+		\caption{Stochastic Gradient Descent}
+		\label{alg:sgd}
+		\KwData{Training set $\mathcal{D}$, learning rate $\eta$, maximum epochs $T$}
+		\KwResult{Trained weights $w_{k, j}$ and $v_{j, p}$}
+		Initialize weights $w_{k, j}$ and $v_{j, p}$, and number of epochs $t = 0$\;
+		
+		\While{stopping conditions not met}{
+			Randomly shuffle $\mathcal{D}$\;
+			
+			\For{each instance $p$}{
+				
+				Perform the feedforward phase to calculate values of hidden units $h_{j, p} \ (j = 1, 2, \ldots, J),$ and output units $o_{k, p} \ (k = 1, 2, \ldots, K)$\;
+				
+				Compute output error signals $\delta_{o_{k, p}}$ and hidden layer error signals $\delta_{h_{j, p}}$\;
+				
+				Perform backpropogation to adjust weights\;
+			}
+			$t \leftarrow t + 1$\;
+			Update values for stopping conditions\;
+		}
+		
+	\end{algorithm}
+	
+	\subsection{Active Learning}
+	NNs are traditionally trained by optimising the weights using all the training instances to calculate errors, referred to as passive learning. Active learning, described in Algorithm~\ref{alg:active_learning} is different because the weights are updated using a subset of the training instances, and the gradually more instances are added to the training pool during training based on the informativeness of those instances. There are two approaches to active learning as described by Engelbrecht~(2001)~\cite{sasla}, incremental learning and selective learning. Incremental learning starts with a small subset of the candidate training set as the training set, and after each iteration, candidate instances based on informativeness is removed from the candidate set and added to the training set. Each candidate training set is a subset of all the previous candidate training sets. Selective learning in contrast starts with all the candidate instances in the training set, and after each iteration a subset of the original candidate set is selected based on some criterion.
+	
+	\begin{algorithm}
+		\caption{Active Learning}
+		\label{alg:active_learning}
+		
+		\KwData{Initial labelled set $\mathcal{L}$, unlabelled pool
+			$\mathcal{U}$, number of iterations $K$, sampling size $B$}
+		\KwResult{Trained weights $w_{k, j}$ and $v_{j, p}$}
+		
+		Initialize weights $w_{k, j}$ and $v_{j, p}$\;
+		
+		\For{$k \gets 1$ \KwTo $K$}{
+			
+			Perform one training epoch on $\mathcal{L}$\;
+			Predict the outcome of each unlabelled instance, $\hat{y}_p, p \in \mathcal{U}$, using the current weights\;
+			Compute informativeness scores $I_p, p \in \mathcal{U}$\;
+			
+			Select teh set, $\mathcal{S}$, of the $B$ observations with the highest informativeness scores\;
+			
+			Update labelled and unlabelled sets:
+			$\mathcal{L} \gets \mathcal{L} \cup \mathcal{S}$, 
+			$\mathcal{U} \gets \mathcal{U} \setminus \mathcal{S}$\;
+			
+			\If{$\mathcal{U} = \emptyset$}{
+				\textbf{break}\;
+			}
+		}
+	\end{algorithm}
+	
+	Sharma~and~Bilgic~\cite{alus} implemented uncertainty sampling for classification to determine the informativeness of instances. The idea is that the model is most uncertain about instances predicted close to the decision boundary, thus these instances are the most informative to include in the training pool. For binary classification the most informative instances will have a probability close to $0.5$., and for multiclass classification the most informative instances have small differences between the probabilities for different classes. The implementation proposed by Sharma~and~Bilgic~\cite{alus} is only applicable to classification because Regression models do not produce a decision boundary or probabilities. Tsymbalov~\textsl{et al.}~\cite{dropoutsasla} proposed a method that performs uncertainty sampling for regression problems, where the neural network uses Monte Carlo-dropout. Dropout is a regularisation method where each hidden unit has a probability $\pi$ to be ignored during each training iteration. Dropout during training reduces the reliance on individual hidden units to reduces the chance of overfitting. Tsymbalov's proposed method uses dropout for predictions instead of training, because this results in non-deterministic predictions. The training instances not included in the current training pool, are predicted multiple times, and the variance of the predictions of each instance is used as the measure of informativeness. The variance of each instance is used because instances with high variance in their predictions are heavily influenced by certain hidden units, thus these units are seen as uncertain.
+	
+	Engelbrecht~(2001)~\cite{sasla} developed the selective learning using sensitivity analysis (SASLA) approach to active learning. The idea of sensitivity analysis is that instances that are highly sensitive to small changes in feature values are informative instances for training. Instances that are sensitive, are likely close to the decision boundary for classification problems. Sensitivity is determined based on first order derivatives of the output units with respect to the input features. The most informative  instances are those with the largest first order derivatives.
 	
 	\section{Methodology}
+	
+	\subsection{Datasets}
+	The active learning approaches will be tested on three classification and three regression datasets available on the UCI database. The first classification dataset is the Diagnostic Wisconsin Breast Cancer dataset, which has 569 instances with 30 features each. The breast cancer dataset is a binary classification problem, where each instance is either malignant or benign, and these classes are highly separable. The second classification dataset is the Dry Bean dataset, which has 13611 instances with 16 features each. The Dry Bean dataset contains 7 classes and the target is to classify which type of bean each instance is. The Student Dropout dataset has 4424 instances with 36 features each. The goal is to predict whether a student enrolled in a specific course, failed or passed the course, or is currently enrolled in the course. The target is very unbalanced, which makes the student dropout dataset a complex problem.
+	
 	
 	
 	\section{Empirical Procedure}
@@ -63,7 +131,7 @@
 	
 	
 	\bibliographystyle{ieeetr}
-	\bibliography{references}
+	\bibliography{active_learning}
 	\appendix
 	
 \end{document}

@@ -6,19 +6,33 @@ import optuna
 from functools import partial
 from pathlib import Path
 import json
+from time import time
 
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import root_mean_squared_error, mean_absolute_error, mean_absolute_percentage_error, r2_score
-from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
+from sklearn.metrics import root_mean_squared_error, mean_absolute_error, mean_absolute_percentage_error, r2_score, mean_squared_error
+from sklearn.model_selection import train_test_split, KFold
 
-def create_regmodel(input_dim, hidden_units, activation='relu', dropout_rate=0.2, out_units=1, out_act='sigmoid', 
-                 learning_rate=0.001, momentum=0.9, weight_decay=0, loss='binary_crossentropy'):
-    model = tf.keras.Sequential([
-        tf.keras.layers.Input(shape=(input_dim,)),
-        tf.keras.layers.Dense(hidedn_units, activation=activation),
-        tf.keras.layers.Dropout(dropout_rate),
-        tf.keras.layers.Dense(out_units, activation=out_act)
-    ])
+def create_regmodel(input_dim, hidden_units, activation='relu', alpha=0, dropout_rate=0.2,  
+                 learning_rate=0.001, momentum=0.9, weight_decay=0, loss='mse'):
+
+    model_layers = [
+        layers.Input(shape=(input_dim,))
+    ]
+
+    if activation == "leaky_relu":
+        model_layers.append(layers.Dense(hidden_units))
+        model_layers.append(layers.LeakyReLU(negative_slope=alpha))
+
+    elif activation == "elu":
+        model_layers.append(layers.Dense(hidden_units))
+        model_layers.append(layers.ELU(alpha=alpha))
+
+    else:
+        model_layers.append(layers.Dense(hidden_units, activation=activation))
+
+    model_layers.append(layers.Dropout(dropout_rate))
+    model_layers.append(layers.Dense(1, activation='linear'))
+    model = tf.keras.Sequential(model_layers)
 
     model.compile(
         optimizer=tf.keras.optimizers.SGD(
@@ -26,8 +40,7 @@ def create_regmodel(input_dim, hidden_units, activation='relu', dropout_rate=0.2
             momentum=momentum,
             weight_decay=weight_decay
         ),
-        loss=loss,
-        metrics=["accuracy"]
+        loss=loss
     )
 
     return model
@@ -51,7 +64,7 @@ def uncertainty_sampling_reg(model, X_unlabelled, n_samples):
     selected_indices = np.argsort(-uncertainty)[:n_samples]
     return selected_indices
 
-def sasla_sampling_reg(model, X_pool, n_samples):
+def sasla_sampling_reg(model, X_pool, activation, alpha, n_samples):
     X = tf.convert_to_tensor(X_pool, dtype=tf.float32)
 
     with tf.GradientTape() as tape:
@@ -59,9 +72,12 @@ def sasla_sampling_reg(model, X_pool, n_samples):
         outputs = model(X, training=False)
     
     J = tape.batch_jacobian(outputs, X).numpy()
-    S = np.max(J, axis=(1, 2))
+    S = np.max(np.abs(J), axis=(1, 2))
 
-    selected_indices = np.argsort(-S)[:n_samples]
+    s_mean = np.mean(S)
+    thres = (1 - beta) * s_mean
+    # selected_indices = np.argsort(-S)[:n_samples]
+    selected_indices = np.where(S > thres)[0]
     return selected_indices
 
 def label_data(selected_indices, labelled, unlabelled):
@@ -75,17 +91,16 @@ def label_data(selected_indices, labelled, unlabelled):
     return new_labelled, new_unlabelled
 
 def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, unlab_size=0.9, random_state=100, verbose=False,
-                       hidden_units=32, activation='relu', dropout_rate=0.2,
+                       hidden_units=32, activation='relu', alpha=0, dropout_rate=0.2,
                        learning_rate=0.001, momentum=0.9, weight_decay=0, loss='mse', 
                        ):
     indices = np.arange(len(X_pool))
     # X_labelled, X_unlabelled, y_labelled, y_unlabelled, \
     idx_labelled, idx_unlabelled = train_test_split(
-        X_pool,
-        y_pool,
+        # X_pool,
+        # y_pool,
         indices,
         test_size=unlab_size,
-        stratify=y_pool,
         random_state=random_state
     )
 
@@ -94,6 +109,7 @@ def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, u
     epochs = 200 // num_iter
     
     history = []
+    tic = time()
     for i in range(num_iter):
         if i == num_iter - 2:
             n_samples = idx_unlabelled.shape[0]
@@ -105,33 +121,35 @@ def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, u
         y_unlabelled = y_pool[idx_unlabelled]
 
         #compile model
-        model = create_regmodel(input_dim=input_dim, hidden_units=hidden_units, activation=activation, dropout_rate=dropout_rate, 
+        model = create_regmodel(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, dropout_rate=dropout_rate, 
                                 out_units=1, out_act='sigmoid', 
                                 learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
 
-        early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=5,
-            restore_best_weights=True
-        )
+        # early_stopping = tf.keras.callbacks.EarlyStopping(
+        #     monitor="val_loss",
+        #     patience=5,
+        #     restore_best_weights=True
+        # )
 
         # train model on labelled data
-        model.fit(
+        iter_hist = model.fit(
             X_labelled,
             y_labelled,
             epochs=epochs,
             batch_size=32,
-            validation_split=0.15,
-            callbacks=[early_stopping],
+            # validation_split=0.15,
+            # callbacks=[early_stopping],
             verbose=0
         )
+        train_loss = iter_hist.history['loss']
 
          # Evaluate
-        y_pred = model(X_val_split, training=False).numpy().ravel()
+        y_pred = model(X_test, training=False).numpy().ravel()
             
-        rmse = root_mean_squared_error(y_val_split, y_pred)
-        mape = mean_absolute_percentage_error(y_val_split, y_pred)
-        r2 = r2_score(y_val_split, y_pred)
+        rmse = root_mean_squared_error(y_test, y_pred)
+        mape = mean_absolute_percentage_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+        toc = time()
 
         if verbose:
             print(f"Iteration {i+1}: {idx_labelled.shape[0]} labelled instances\n"
@@ -139,7 +157,8 @@ def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, u
                   f"\tMAPE = {mape}\n"
                   f"\tR^2 = {r2}\n"
             )
-        history.append({'Labelled': idx_labelled.shape[0], 'rmse': rmse, 'mape': mape, 'R_squared': r2})
+        history.append({'Labelled': idx_labelled.shape[0], 'cumulative epochs': epochs * (i + 1), 'Training loss': train_loss[-1], 
+                        'rmse': rmse, 'mape': mape, 'R_squared': r2, 'time': toc - tic}})
 
         # determine instances that should be labelled
         if i < num_iter - 1:
@@ -148,59 +167,60 @@ def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, u
 
     return history
 
-def sasla_reg(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random_state=100, verbose=False,
-                       hidden_units=32, activation='relu', dropout_rate=0.2,
-                       learning_rate=0.001, momentum=0.9, weight_decay=0, loss='binary_crossentropy', 
-                       ):
+def sasla_reg(X_pool, y_pool, X_test, y_test, num_iter=10, random_state=100, verbose=False,
+               hidden_units=32, activation='relu', alpha=0, dropout_rate=0.2,
+               learning_rate=0.001, momentum=0.9, weight_decay=0, loss='mse', beta=0.9):
+    
     indices = np.arange(len(X_pool))
     idx_labelled = indices.copy()
 
     input_dim = X_pool.shape[1]
-    n_samples = X_pool.shape[0]
-    n_reduce = n_samples * unlab // (num_iter-1)
-    excess = n_samples * unlab - n_reduce * (num_iter-1)
+    # n_samples = X_pool.shape[0]
+    # n_reduce = n_samples * unlab // (num_iter-1)
+    # excess = n_samples * unlab - n_reduce * (num_iter-1)
     epochs = 200 // num_iter
     history = []
+    tic = time()
     for i in range(num_iter):
 
         # update pool of labelled data
         X_labelled = X_pool[idx_labelled]
         y_labelled = y_pool[idx_labelled]
-        X_unlabelled = X_pool[idx_unlabelled]
-        y_unlabelled = y_pool[idx_unlabelled]
 
         #compile model
-        model = create_regmodel(input_dim=input_dim, hidden_units=hidden_units, activation=activation, dropout_rate=dropout_rate,
+        model = create_regmodel(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, dropout_rate=dropout_rate,
                                 out_units=1, out_act='sigmoid', 
                                 learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
 
-        early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=5,
-            restore_best_weights=True
-        )
+        # early_stopping = tf.keras.callbacks.EarlyStopping(
+        #     monitor="val_loss",
+        #     patience=5,
+        #     restore_best_weights=True
+        # )
         
         # train model on labelled data
         fit_kwargs = {
             "epochs": epochs,
             "batch_size": 32,
-            "validation_split": 0.15,
-            "callbacks": [early_stopping],
+            # "validation_split": 0.15,
+            # "callbacks": [early_stopping],
             "verbose": 0
         }
             
-        model.fit(
-            X_train_split,
-            y_train_split,
+        iter_hist = model.fit(
+            X_labelled,
+            y_labelled,
             **fit_kwargs
         )
+        train_loss = iter_hist.history['loss']
 
          # Evaluate
-        y_prob = model.predict(X_test, verbose=0).ravel()
-        y_pred = (y_prob >= 0.5).astype(int)
-        acc = accuracy_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred, average='macro')
-        auc = roc_auc_score(y_test, y_prob)
+        y_pred = model(X_test, training=False).numpy().ravel()
+            
+        rmse = root_mean_squared_error(y_test, y_pred)
+        mape = mean_absolute_percentage_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+        toc = time()
 
         if verbose:
             print(f"Iteration {i+1}: {idx_labelled.shape[0]} labelled instances\n"
@@ -208,30 +228,31 @@ def sasla_reg(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, rando
                   f"\tmacro F1 = {f1}\n"
                   f"\tAUC = {auc}\n"
             )
-        history.append({'Labelled': idx_labelled.shape[0], 'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc})
+        history.append({'Labelled': idx_labelled.shape[0], 'cumulative epochs': epochs * (i + 1), 'Training loss': train_loss[-1], 
+                        'rmse': rmse, 'mape': mape, 'R_squared': r2, 'time': toc - tic}})
 
         # determine instances that should be labelled
-        selected_indices = sasla_sampling_reg(model, X_pool, n_samples)
-        idx_labelled, idx_unlabelled = label_data(selected_indices, idx_labelled, idx_unlabelled)
+        if i < num_iter - 1:
+            idx_labelled = sasla_sampling_reg(model, X_pool, activation, alpha, beta)
 
-        n_samples -= n_reduce
-        if i == 0:
-            n_samples -= excess
+        # n_samples -= n_reduce
+        # if i == 0:
+        #     n_samples -= excess
 
     return history
 
-def obj(trial, X_train, y_train, out_units=1, out_act='sigmoid', loss="binary_crossentropy", k=5, activation='relu', dropout_rate=0.2, random_state=42):
+def obj(trial, X_train, y_train, out_units=1, out_act='sigmoid', loss="mse", k=5, activation='relu', dropout_rate=0.2, random_state=42):
     params = {
         "hidden_layer": trial.suggest_int(
-            "hidden_layer", 8, 128
+            "hidden_layer", 32, 128
         ),
         "learning_rate": trial.suggest_float(
-            "learning_rate", 1e-4, 1e-1, log=True
+            "learning_rate", 1e-5, 1e-3, log=True
         ),
         "momentum": trial.suggest_float(
             "momentum",
             0.0,
-            0.99
+            0.5
         ),
         "weight_decay": trial.suggest_float(
             "weight_decay",
@@ -256,7 +277,7 @@ def obj(trial, X_train, y_train, out_units=1, out_act='sigmoid', loss="binary_cr
             2.0
         )
 
-    cv = StratifiedKFold(
+    cv = KFold(
         n_splits=k,
         shuffle=True,
         random_state=random_state
@@ -304,7 +325,7 @@ def obj(trial, X_train, y_train, out_units=1, out_act='sigmoid', loss="binary_cr
 
         es = tf.keras.callbacks.EarlyStopping(
             monitor="val_loss",
-            patience=5,
+            patience=10,
             restore_best_weights=True
         )
         fit_kwargs = {
@@ -315,26 +336,21 @@ def obj(trial, X_train, y_train, out_units=1, out_act='sigmoid', loss="binary_cr
             "verbose": 0
         }
             
-        model.fit(
+        history = model.fit(
             X_train_split,
             y_train_split,
             **fit_kwargs
         )
 
-        if out_units == 1:
-            y_prob = model(X_val_split, training=False).numpy().ravel()
-            score = tf.keras.losses.binary_crossentropy(
-                y_val_split,
-                y_prob
-            )
-            scores.append(np.mean(score))
-        else:
-            y_prob = model(X_val_split, training=False).numpy()
-            score = tf.keras.losses.sparse_categorical_crossentropy(
-                y_val_split,
-                y_prob
-            )
-            scores.append(np.mean(score))
+        train_loss = np.asarray(history.history["loss"])
+        if not np.all(np.isfinite(train_loss)):
+            return float("inf")
+
+        y_pred = model(X_val_split, training=False).numpy()
+        if not np.all(np.isfinite(y_pred)):
+            return float("inf")
+        score = mean_squared_error(y_val_split, y_pred)
+        scores.append(score)
 
         avg_so_far = np.mean(scores)
 
@@ -346,7 +362,7 @@ def obj(trial, X_train, y_train, out_units=1, out_act='sigmoid', loss="binary_cr
     avg_score = np.mean(scores)
     return avg_score
 
-def tune_params(X_train, y_train, loss="binary_crossentropy", out_units=1, out_act='sigmoid', k=5, activation='relu', dropout_rate=0.2, random_state=42, 
+def tune_params(X_train, y_train, loss="mse", out_units=1, out_act='linear', k=5, activation='relu', dropout_rate=0.2, random_state=42, 
                 n_trials=100, export=False, file='params.json'):
 
     objective = partial(
@@ -359,7 +375,6 @@ def tune_params(X_train, y_train, loss="binary_crossentropy", out_units=1, out_a
         k=k,
         activation=activation,
         dropout_rate=dropout_rate,
-        balanced=balanced,
         random_state=random_state
     )
     
@@ -396,12 +411,12 @@ def retrieve_params(file='params.json'):
         return json.load(f)
 
 def cv_regression(X_train, y_train, out_units=1, out_act='linear', loss="mse", k=5, random_state=42, 
-                  hidden_units=32, activation='relu', dropout_rate=0.2, alpha=0, 
+                  hidden_units=32, activation='relu', alpha=0, dropout_rate=0.2, 
                   learning_rate=0.01, momentum=0, weight_decay=0):
 
     y_pred = None
     
-    cv = StratifiedKFold(
+    cv = KFold(
         n_splits=k,
         shuffle=True,
         random_state=random_state

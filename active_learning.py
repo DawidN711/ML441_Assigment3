@@ -6,6 +6,7 @@ import optuna
 from functools import partial
 from pathlib import Path
 import json
+from time import time
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import f1_score, accuracy_score, roc_auc_score
@@ -13,13 +14,26 @@ from sklearn.metrics import root_mean_squared_error, mean_absolute_error, mean_a
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
 
-def create_model(input_dim, hidden_units, activation='relu', out_units=1, out_act='sigmoid', 
+def create_model(input_dim, hidden_units, activation='relu', alpha=0, out_units=1, out_act='sigmoid', 
                  learning_rate=0.001, momentum=0.9, weight_decay=0, loss='binary_crossentropy'):
-    model = tf.keras.Sequential([
-        tf.keras.layers.Input(shape=(input_dim,)),
-        tf.keras.layers.Dense(hidedn_units, activation=activation),
-        tf.keras.layers.Dense(out_units, activation=out_act)
-    ])
+
+    model_layers = [
+        layers.Input(shape=(input_dim,))
+    ]
+
+    if activation == "leaky_relu":
+        model_layers.append(layers.Dense(hidden_units))
+        model_layers.append(layers.LeakyReLU(negative_slope=alpha))
+
+    elif activation == "elu":
+        model_layers.append(layers.Dense(hidden_units))
+        model_layers.append(layers.ELU(alpha=alpha))
+
+    else:
+        model_layers.append(layers.Dense(hidden_units, activation=activation))
+
+    model_layers.append(layers.Dense(out_units, activation=out_act))
+    model = tf.keras.Sequential(model_layers)
 
     model.compile(
         optimizer=tf.keras.optimizers.SGD(
@@ -27,8 +41,7 @@ def create_model(input_dim, hidden_units, activation='relu', out_units=1, out_ac
             momentum=momentum,
             weight_decay=weight_decay
         ),
-        loss=loss,
-        metrics=["accuracy"]
+        loss=loss
     )
 
     return model
@@ -41,13 +54,13 @@ def passive_sampling(model, X_unlabelled, n_targets, n_samples):
     )
     return selected_indices
 
-def uncertainty_sampling(model, X_unlabelled, n_targets, n_samples):
+def uncertainty_sampling(model, X_unlabelled, n_classes, n_samples):
     probabilities = model.predict(
         X_unlabelled,
         verbose=0
     )
     selected_indices = None
-    if targets == 1:
+    if n_classes == 1:
         probabilities = probabilities.ravel()
         uncertainty = np.abs(probabilities - 0.5)
         selected_indices = np.argsort(uncertainty)[:n_samples]
@@ -98,23 +111,42 @@ def uncertainty_sampling(model, X_unlabelled, n_targets, n_samples):
 #     selected_indices = np.argsort(-S)[:n_samples]
 #     return selected_indices
 
-def sasla_sampling(model, X_pool, n_targets, n_samples):
+def sasla_sampling(model, X_pool, activation, alpha, n_targets, beta):
     # Model outputs
     probabilities = model(X_pool, training=False).numpy()
-
-    # Hidden-layer outputs
-    hidden_model = tf.keras.Model(
-        inputs=model.input,
-        outputs=model.layers[0].output
-    )
-    hidden_values = hidden_model(X_pool, training=False).numpy()
+    
+    hidden_values = model.layers[0](
+        X_pool,
+        training=False
+    ).numpy()
+    # hidden_values = hidden_model(X_pool, training=False).numpy()
 
     # Weights
     weights = model.get_weights()
     hidden_weights = weights[0]    
     output_weights = weights[2]    
 
-    hidden_derivative = hidden_values * (1 - hidden_values)
+    hidden_derivatives = None
+    if activation == 'relu':
+        hidden_derivative = np.where(
+            hidden_values > 0,
+            1.0,
+            0.0
+        )
+    elif activation == 'leaky_relu':
+        hidden_derivative = np.where(
+            hidden_values > 0,
+            1.0,
+            alpha
+        )
+    elif activation == 'elu':
+        hidden_derivative = np.where(
+            hidden_values > 0,
+            1.0,
+            alpha * np.exp(hidden_values)
+        )
+    else:
+        hidden_derivative = hidden_values * (1 - hidden_values)
     total = np.einsum(
         'pj,jk,ij->pki',
         hidden_derivative,
@@ -124,9 +156,12 @@ def sasla_sampling(model, X_pool, n_targets, n_samples):
 
     output_derivative = probabilities * (1 - probabilities)
     S = total * output_derivative[:, :, np.newaxis]
-    S = np.max(S, axis=(1, 2))
-
-    selected_indices = np.argsort(-S)[:n_samples]
+    S = np.max(np.abs(S), axis=(1, 2))
+    s_mean = np.mean(S)
+    thres = (1 - beta) * s_mean
+    # selected_indices = np.argsort(-S)[:n_samples]
+    selected_indices = np.where(S > thres)[0]
+    
     return selected_indices
 
 def label_data(selected_indices, labelled, unlabelled):
@@ -140,14 +175,14 @@ def label_data(selected_indices, labelled, unlabelled):
     return new_labelled, new_unlabelled
 
 def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, unlab_size=0.9, random_state=100, verbose=False,
-                       hidden_units=32, activation='relu', balanced=False,
+                       hidden_units=32, activation='relu', alpha=0, balanced=False,
                        learning_rate=0.001, momentum=0.9, weight_decay=0, loss='binary_crossentropy', 
                        ):
     indices = np.arange(len(X_pool))
     # X_labelled, X_unlabelled, y_labelled, y_unlabelled, \
     idx_labelled, idx_unlabelled = train_test_split(
-        X_pool,
-        y_pool,
+        # X_pool,
+        # y_pool,
         indices,
         test_size=unlab_size,
         stratify=y_pool,
@@ -159,6 +194,7 @@ def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
     epochs = 200 // num_iter
     
     history = []
+    tic = time()
     for i in range(num_iter):
         if i == num_iter - 2:
             n_samples = idx_unlabelled.shape[0]
@@ -170,21 +206,21 @@ def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
         y_unlabelled = y_pool[idx_unlabelled]
 
         #compile model
-        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, out_units=1, out_act='sigmoid', 
+        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=1, out_act='sigmoid', 
                              learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
 
-        early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=5,
-            restore_best_weights=True
-        )
+        # early_stopping = tf.keras.callbacks.EarlyStopping(
+        #     monitor="val_loss",
+        #     patience=5,
+        #     restore_best_weights=True
+        # )
         
         # train model on labelled data
         fit_kwargs = {
             "epochs": epochs,
             "batch_size": 32,
-            "validation_split": 0.15,
-            "callbacks": [early_stopping],
+            # "validation_split": 0.15,
+            # "callbacks": [early_stopping],
             "verbose": 0
         }
         if balanced:
@@ -192,11 +228,12 @@ def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
                 y_train_split
             )
             
-        model.fit(
-            X_train_split,
-            y_train_split,
+        iter_hist = model.fit(
+            X_labelled,
+            y_labelled,
             **fit_kwargs
         )
+        train_loss = iter_hist.history['loss']
 
          # Evaluate
         y_prob = model.predict(X_test, verbose=0).ravel()
@@ -204,14 +241,14 @@ def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
         acc = accuracy_score(y_test, y_pred)
         f1 = f1_score(y_test, y_pred, average='macro')
         auc = roc_auc_score(y_test, y_prob)
+        toc = time()
 
         if verbose:
             print(f"Iteration {i+1}: {idx_labelled.shape[0]} labelled instances\n"
-                  f"\tAccuracy = {acc}\n"
-                  f"\tmacro F1 = {f1}\n"
-                  f"\tAUC = {auc}\n"
+                  f"\tTraining loss = {train_loss[-1]}\n"
             )
-        history.append({'Labelled': idx_labelled.shape[0], 'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc})
+        history.append({'Labelled': idx_labelled.shape[0], 'cumulative epochs': epochs * (i + 1), 'Training loss': train_loss[-1], 
+                        'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc, 'time': toc - tic})
 
         # determine instances that should be labelled
         if i < num_iter - 1:
@@ -221,14 +258,14 @@ def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
     return history
 
 def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, unlab_size=0.9, random_state=100, verbose=False,
-                       hidden_units=32, activation='relu', out_units=3, out_act='softmax', balanced=False, 
+                       hidden_units=32, activation='relu', alpha=0, out_units=3, out_act='softmax', balanced=False, 
                        learning_rate=0.001, momentum=0.9, weight_decay=0, loss='sparse_categorical_crossentropy', 
                        ):
     indices = np.arange(len(X_pool))
-    X_labelled, X_unlabelled, y_labelled, y_unlabelled, \
+    # X_labelled, X_unlabelled, y_labelled, y_unlabelled, \
     idx_labelled, idx_unlabelled = train_test_split(
-        X_pool,
-        y_pool,
+        # X_pool,
+        # y_pool,
         indices,
         test_size=unlab_size,
         stratify=y_pool,
@@ -240,6 +277,7 @@ def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
     epochs = 200 // num_iter
     
     history = []
+    tic = time()
     for i in range(num_iter):
         if i == num_iter - 2:
             n_samples = idx_unlabelled.shape[0]
@@ -255,21 +293,21 @@ def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
         y_unlabelled = y_pool[idx_unlabelled]
 
         # compile model
-        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, out_units=out_units, out_act=out_act, 
+        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=out_units, out_act=out_act, 
                              learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
 
-        early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=5,
-            restore_best_weights=True
-        )
+        # early_stopping = tf.keras.callbacks.EarlyStopping(
+        #     monitor="val_loss",
+        #     patience=5,
+        #     restore_best_weights=True
+        # )
 
         # train model on labelled data
         fit_kwargs = {
             "epochs": epochs,
             "batch_size": 32,
-            "validation_split": 0.15,
-            "callbacks": [early_stopping],
+            # "validation_split": 0.15,
+            # "callbacks": [early_stopping],
             "verbose": 0
         }
         if balanced:
@@ -277,11 +315,12 @@ def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
                 y_train_split
             )
             
-        model.fit(
-            X_train_split,
-            y_train_split,
+        iter_hist = model.fit(
+            X_labelled,
+            y_labelled,
             **fit_kwargs
         )
+        train_loss = iter_hist.history['loss']
 
          # Evaluate
         y_prob = model.predict(X_test, verbose=0)
@@ -295,6 +334,7 @@ def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
             multi_class="ovr",
             average="macro"
         )
+        toc = time()
 
         if verbose:
             print(f"Iteration {i+1}: {idx_labelled.shape[0]} labelled instances\n"
@@ -302,7 +342,8 @@ def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
                   f"\tmacro F1 = {f1}\n"
                   f"\tAUC = {auc}\n"
             )
-        history.append({'Labelled': idx_labelled.shape[0], 'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc})
+        history.append({'Labelled': idx_labelled.shape[0], 'cumulative epochs': epochs * (i + 1), 'Training loss': train_loss[-1],
+                        'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc, 'time': toc-tic})
 
         # determine instances that should be labelled
         if i < num_iter - 1:
@@ -312,54 +353,54 @@ def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
     return history
 
 def sasla_bc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random_state=100, verbose=False,
-                       hidden_units=32, activation='relu', balanced=False,
-                       learning_rate=0.001, momentum=0.9, weight_decay=0, loss='binary_crossentropy', 
+                       hidden_units=32, activation='relu', alpha=0, balanced=False,
+                       learning_rate=0.001, momentum=0.9, weight_decay=0, loss='binary_crossentropy', beta=0.9
                        ):
     indices = np.arange(len(X_pool))
     idx_labelled = indices.copy()
-
+    
     input_dim = X_pool.shape[1]
-    n_samples = X_pool.shape[0]
-    n_reduce = n_samples * unlab // (num_iter-1)
-    excess = n_samples * unlab - n_reduce * (num_iter-1)
+    # n_samples = X_pool.shape[0]
+    # n_reduce = np.ceil(n_samples * unlab_size) // (num_iter-1)
+    # excess = np.ceil(n_samples * unlab_size) - n_reduce * (num_iter-1)
     epochs = 200 // num_iter
+    
     history = []
+    tic = time()
     for i in range(num_iter):
 
         # update pool of labelled data
         X_labelled = X_pool[idx_labelled]
         y_labelled = y_pool[idx_labelled]
-        X_unlabelled = X_pool[idx_unlabelled]
-        y_unlabelled = y_pool[idx_unlabelled]
 
         #compile model
-        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, out_units=1, out_act='sigmoid', 
+        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=1, out_act='sigmoid', 
                              learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
 
-        early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=5,
-            restore_best_weights=True
-        )
+        # early_stopping = tf.keras.callbacks.EarlyStopping(
+        #     monitor="val_loss",
+        #     patience=5,
+        #     restore_best_weights=True
+        # )
         
         # train model on labelled data
         fit_kwargs = {
             "epochs": epochs,
             "batch_size": 32,
-            "validation_split": 0.15,
-            "callbacks": [early_stopping],
+            # "validation_split": 0.15,
+            # "callbacks": [early_stopping],
             "verbose": 0
         }
         if balanced:
             fit_kwargs["class_weight"] = balanced_weights(
                 y_train_split
             )
-            
-        model.fit(
-            X_train_split,
-            y_train_split,
+        iter_hist = model.fit(
+            X_labelled,
+            y_labelled,
             **fit_kwargs
         )
+        train_loss = iter_hist.history['loss']
 
          # Evaluate
         y_prob = model.predict(X_test, verbose=0).ravel()
@@ -367,6 +408,7 @@ def sasla_bc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
         acc = accuracy_score(y_test, y_pred)
         f1 = f1_score(y_test, y_pred, average='macro')
         auc = roc_auc_score(y_test, y_prob)
+        toc = time()
 
         if verbose:
             print(f"Iteration {i+1}: {idx_labelled.shape[0]} labelled instances\n"
@@ -374,61 +416,57 @@ def sasla_bc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
                   f"\tmacro F1 = {f1}\n"
                   f"\tAUC = {auc}\n"
             )
-        history.append({'Labelled': idx_labelled.shape[0], 'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc})
+        history.append({'Labelled': idx_labelled.shape[0], 'cumulative epochs': epochs * (i + 1), 'Training loss': train_loss[-1], 
+                        'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc, 'time': toc - tic})
+
+        # # reduce subset size
+        # n_samples -= n_reduce
+        # if i == 0:
+        #     n_samples -= excess
 
         # determine instances that should be labelled
-        selected_indices = sasla_sampling(model, X_pool, 1, n_samples)
-        idx_labelled, idx_unlabelled = label_data(selected_indices, idx_labelled, idx_unlabelled)
-
-        n_samples -= n_reduce
-        if i == 0:
-            n_samples -= excess
+        if i < num_iter - 1:
+            idx_labelled = sasla_sampling(model, X_pool, activation, alpha, 1, beta)
+            if len(idx_labelled) < (1 - unlab_size) *X_pool.shape[0]:
+                break
 
     return history
 
 def sasla_mc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random_state=100, verbose=False,
-                       hidden_units=32, activation='relu', out_units=3, out_act='softmax', balanced=False, 
-                       learning_rate=0.001, momentum=0.9, weight_decay=0, loss='sparse_categorical_crossentropy', 
+                       hidden_units=32, activation='relu', alpha=0, out_units=3, out_act='softmax', balanced=False, 
+                       learning_rate=0.001, momentum=0.9, weight_decay=0, loss='sparse_categorical_crossentropy', beta=0.9
                        ):
     indices = np.arange(len(X_pool))
     idx_labelled = indices.copy()
 
     input_dim = X_pool.shape[1]
-    n_samples = X_pool.shape[0]
-    n_reduce = n_samples * unlab // (num_iter-1)
-    excess = n_samples * unlab - n_reduce * (num_iter-1)
+    # n_samples = X_pool.shape[0]
+    # n_reduce = n_samples * unlab_size // (num_iter-1)
+    # excess = n_samples * unlab_size - n_reduce * (num_iter-1)
     epochs = 200 // num_iter
     history = []
+    tic = time()
     for i in range(num_iter):
-        if i == num_iter - 2:
-            n_samples = idx_unlabelled.shape[0]
-
         # update pool of labelled data
-        # X_labelled = X_pool.iloc[idx_labelled]
-        # y_labelled = y_pool.iloc[idx_labelled]
-        # X_unlabelled = X_pool.iloc[idx_unlabelled]
-        # y_unlabelled = y_pool.iloc[idx_unlabelled]
         X_labelled = X_pool[idx_labelled]
         y_labelled = y_pool[idx_labelled]
-        X_unlabelled = X_pool[idx_unlabelled]
-        y_unlabelled = y_pool[idx_unlabelled]
 
         # compile model
-        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, out_units=out_units, out_act=out_act, 
+        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=out_units, out_act=out_act, 
                              learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
 
-        early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=5,
-            restore_best_weights=True
-        )
+        # early_stopping = tf.keras.callbacks.EarlyStopping(
+        #     monitor="val_loss",
+        #     patience=5,
+        #     restore_best_weights=True
+        # )
 
         # train model on labelled data
         fit_kwargs = {
             "epochs": epochs,
             "batch_size": 32,
-            "validation_split": 0.15,
-            "callbacks": [early_stopping],
+            # "validation_split": 0.15,
+            # "callbacks": [early_stopping],
             "verbose": 0
         }
         if balanced:
@@ -436,11 +474,12 @@ def sasla_mc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
                 y_train_split
             )
             
-        model.fit(
-            X_train_split,
-            y_train_split,
+        iter_hist = model.fit(
+            X_labelled,
+            y_labelled,
             **fit_kwargs
         )
+        train_loss = iter_hist.history['loss']
 
          # Evaluate
         y_prob = model.predict(X_test, verbose=0)
@@ -454,6 +493,7 @@ def sasla_mc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
             multi_class="ovr",
             average="macro"
         )
+        toc = time()
 
         if verbose:
             print(f"Iteration {i+1}: {idx_labelled.shape[0]} labelled instances\n"
@@ -461,15 +501,19 @@ def sasla_mc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
                   f"\tmacro F1 = {f1}\n"
                   f"\tAUC = {auc}\n"
             )
-        history.append({'Labelled': idx_labelled.shape[0], 'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc})
+        history.append({'Labelled': idx_labelled.shape[0], 'cumulative epochs': epochs * (i + 1), 'Training loss': train_loss[-1],
+                        'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc, 'time': toc - tic})
+
+        # # reduce subset size
+        # n_samples -= n_reduce
+        # if i == 0:
+        #     n_samples -= excess
 
         # determine instances that should be labelled
-        selected_indices = sasla_sampling(model, X_pool, out_units, n_samples)
-        idx_labelled, idx_unlabelled = label_data(selected_indices, idx_labelled, idx_unlabelled)
-
-        n_samples -= n_reduce
-        if i == 0:
-            n_samples -= excess
+        if i < num_iter - 1:
+            idx_labelled = sasla_sampling(model, X_pool, activation, alpha, out_units, beta)
+            if len(idx_labelled) < (1 - unlab_size) *X_pool.shape[0]:
+                break
 
     return history
 
@@ -486,15 +530,15 @@ def balanced_weights(y_train):
 def obj(trial, X_train, y_train, out_units=1, out_act='sigmoid', loss="binary_crossentropy", k=5, activation='relu', balanced=False, random_state=42):
     params = {
         "hidden_layer": trial.suggest_int(
-            "hidden_layer", 8, 128
+            "hidden_layer", 32, 128
         ),
         "learning_rate": trial.suggest_float(
-            "learning_rate", 1e-4, 1e-1, log=True
+            "learning_rate", 1e-4, 1e-2, log=True
         ),
         "momentum": trial.suggest_float(
             "momentum",
             0.0,
-            0.99
+            0.5
         ),
         "weight_decay": trial.suggest_float(
             "weight_decay",
@@ -566,7 +610,7 @@ def obj(trial, X_train, y_train, out_units=1, out_act='sigmoid', loss="binary_cr
 
         es = tf.keras.callbacks.EarlyStopping(
             monitor="val_loss",
-            patience=5,
+            patience=10,
             restore_best_weights=True
         )
         fit_kwargs = {
