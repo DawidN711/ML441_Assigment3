@@ -46,7 +46,7 @@ def create_model(input_dim, hidden_units, activation='relu', alpha=0, out_units=
 
     return model
 
-def passive_sampling(model, X_unlabelled, n_targets, n_samples):
+def random_sampling(model, X_unlabelled, n_targets, n_samples):
     selected_indices = np.random.choice(
         X_unlabelled.shape[0],
         size=n_samples,
@@ -192,6 +192,10 @@ def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
     input_dim = X_pool.shape[1]
     n_samples = len(idx_unlabelled) // (num_iter-1)
     epochs = 200 // num_iter
+
+    #compile model
+    model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=1, out_act='sigmoid', 
+                         learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
     
     history = []
     tic = time()
@@ -204,10 +208,6 @@ def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
         y_labelled = y_pool[idx_labelled]
         X_unlabelled = X_pool[idx_unlabelled]
         y_unlabelled = y_pool[idx_unlabelled]
-
-        #compile model
-        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=1, out_act='sigmoid', 
-                             learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
 
         # early_stopping = tf.keras.callbacks.EarlyStopping(
         #     monitor="val_loss",
@@ -275,6 +275,10 @@ def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
     input_dim = X_pool.shape[1]
     n_samples = len(idx_unlabelled) // (num_iter-1)
     epochs = 200 // num_iter
+
+    # compile model
+    model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=out_units, out_act=out_act, 
+                         learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
     
     history = []
     tic = time()
@@ -291,10 +295,6 @@ def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
         y_labelled = y_pool[idx_labelled]
         X_unlabelled = X_pool[idx_unlabelled]
         y_unlabelled = y_pool[idx_unlabelled]
-
-        # compile model
-        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=out_units, out_act=out_act, 
-                             learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
 
         # early_stopping = tf.keras.callbacks.EarlyStopping(
         #     monitor="val_loss",
@@ -364,6 +364,10 @@ def sasla_bc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
     # n_reduce = np.ceil(n_samples * unlab_size) // (num_iter-1)
     # excess = np.ceil(n_samples * unlab_size) - n_reduce * (num_iter-1)
     epochs = 200 // num_iter
+
+    #compile model
+    model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=1, out_act='sigmoid', 
+                         learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
     
     history = []
     tic = time()
@@ -372,16 +376,6 @@ def sasla_bc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
         # update pool of labelled data
         X_labelled = X_pool[idx_labelled]
         y_labelled = y_pool[idx_labelled]
-
-        #compile model
-        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=1, out_act='sigmoid', 
-                             learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
-
-        # early_stopping = tf.keras.callbacks.EarlyStopping(
-        #     monitor="val_loss",
-        #     patience=5,
-        #     restore_best_weights=True
-        # )
         
         # train model on labelled data
         fit_kwargs = {
@@ -443,6 +437,11 @@ def sasla_mc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
     # n_samples = X_pool.shape[0]
     # n_reduce = n_samples * unlab_size // (num_iter-1)
     # excess = n_samples * unlab_size - n_reduce * (num_iter-1)
+
+    # compile model
+    model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=out_units, out_act=out_act, 
+                         learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
+
     epochs = 200 // num_iter
     history = []
     tic = time()
@@ -450,16 +449,6 @@ def sasla_mc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
         # update pool of labelled data
         X_labelled = X_pool[idx_labelled]
         y_labelled = y_pool[idx_labelled]
-
-        # compile model
-        model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=out_units, out_act=out_act, 
-                             learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
-
-        # early_stopping = tf.keras.callbacks.EarlyStopping(
-        #     monitor="val_loss",
-        #     patience=5,
-        #     restore_best_weights=True
-        # )
 
         # train model on labelled data
         fit_kwargs = {

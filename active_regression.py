@@ -45,7 +45,7 @@ def create_regmodel(input_dim, hidden_units, activation='relu', alpha=0, dropout
 
     return model
 
-def passive_sampling(model, X_unlabelled, n_samples):
+def random_sampling(model, X_unlabelled, n_samples):
     selected_indices = np.random.choice(
         X_unlabelled.shape[0],
         size=n_samples,
@@ -58,13 +58,27 @@ def uncertainty_sampling_reg(model, X_unlabelled, n_samples):
         model(X_unlabelled, training=True).numpy().ravel()
         for _ in range(20)
     ])
+
+    # print("Predictions finite:", np.all(np.isfinite(predictions)))
+    # print("Prediction range:",
+    #       np.nanmin(predictions),
+    #       np.nanmax(predictions))
     
     uncertainty = np.var(predictions, axis=0)
+
+    # print("Uncertainty finite:", np.all(np.isfinite(uncertainty)))
+    # print("Uncertainty range:",
+    #       np.nanmin(uncertainty),
+    #       np.nanmax(uncertainty))
     
     selected_indices = np.argsort(-uncertainty)[:n_samples]
+
+    # print("Selected uncertainty:",
+    #       uncertainty[selected_indices])
+    
     return selected_indices
 
-def sasla_sampling_reg(model, X_pool, activation, alpha, n_samples):
+def sasla_sampling_reg(model, X_pool, activation, alpha, beta):
     X = tf.convert_to_tensor(X_pool, dtype=tf.float32)
 
     with tf.GradientTape() as tape:
@@ -107,9 +121,15 @@ def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, u
     input_dim = X_pool.shape[1]
     n_samples = len(idx_unlabelled) // (num_iter-1)
     epochs = 200 // num_iter
+
+    #compile model
+    model = create_regmodel(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, dropout_rate=dropout_rate,
+                            learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
     
     history = []
     tic = time()
+    # old_weights = None
+    # old_state = None
     for i in range(num_iter):
         if i == num_iter - 2:
             n_samples = idx_unlabelled.shape[0]
@@ -119,17 +139,6 @@ def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, u
         y_labelled = y_pool[idx_labelled]
         X_unlabelled = X_pool[idx_unlabelled]
         y_unlabelled = y_pool[idx_unlabelled]
-
-        #compile model
-        model = create_regmodel(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, dropout_rate=dropout_rate, 
-                                out_units=1, out_act='sigmoid', 
-                                learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
-
-        # early_stopping = tf.keras.callbacks.EarlyStopping(
-        #     monitor="val_loss",
-        #     patience=5,
-        #     restore_best_weights=True
-        # )
 
         # train model on labelled data
         iter_hist = model.fit(
@@ -142,23 +151,64 @@ def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, u
             verbose=0
         )
         train_loss = iter_hist.history['loss']
+        # print(train_loss)
+
+        # if not np.all(np.isfinite(train_loss)):
+
+        #     print("\nOPTIMIZER STATE BEFORE FIT")
+
+        #     for v in old_state:
+        #         arr = v.numpy()
+            
+        #         print(
+        #             v.name,
+        #             "finite =", np.all(np.isfinite(arr)),
+        #             "norm =", np.linalg.norm(arr),
+        #             "min =", np.min(arr),
+        #             "max =", np.max(arr)
+        #         )
+    
+        #     print('BEFORE')
+        #     for j, w in enumerate(old_weights):
+        #         print(
+        #             f"weight {j}: "
+        #             f"finite={np.all(np.isfinite(w))}, "
+        #             f"norm={np.linalg.norm(w):.6f}, "
+        #             f"min={np.min(w):.6f}, "
+        #             f"max={np.max(w):.6f}"
+        #         )
+        #     print('\nAFTER')
+        #     for j, w in enumerate(model.get_weights()):
+        #         print(
+        #             f"weight {j}: finite={np.all(np.isfinite(w))}, "
+        #             f"min={np.min(w)}, max={np.max(w)}"
+        #         )
 
          # Evaluate
         y_pred = model(X_test, training=False).numpy().ravel()
+
+        # if not np.all(np.isfinite(y_pred)):
+        #     print(
+        #         "Predictions:",
+        #         np.all(np.isfinite(y_pred)),
+        #         np.min(y_pred),
+        #         np.max(y_pred)
+        #     )
             
         rmse = root_mean_squared_error(y_test, y_pred)
         mape = mean_absolute_percentage_error(y_test, y_pred)
+        mae = mean_absolute_error(y_test, y_pred)
         r2 = r2_score(y_test, y_pred)
         toc = time()
 
         if verbose:
             print(f"Iteration {i+1}: {idx_labelled.shape[0]} labelled instances\n"
-                  f"\tRMSE = {rmse}\n"
-                  f"\tMAPE = {mape}\n"
-                  f"\tR^2 = {r2}\n"
+                  f"\t{train_loss[0]}\n"
+                  f"\t{train_loss[1]}\n"
+                  f"\tTest MAPE = {mape}\n"
             )
         history.append({'Labelled': idx_labelled.shape[0], 'cumulative epochs': epochs * (i + 1), 'Training loss': train_loss[-1], 
-                        'rmse': rmse, 'mape': mape, 'R_squared': r2, 'time': toc - tic}})
+                        'rmse': rmse, 'mape': mape, 'mae': mae, 'R_squared': r2, 'time': toc - tic})
 
         # determine instances that should be labelled
         if i < num_iter - 1:
@@ -167,7 +217,7 @@ def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, u
 
     return history
 
-def sasla_reg(X_pool, y_pool, X_test, y_test, num_iter=10, random_state=100, verbose=False,
+def sasla_reg(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random_state=100, verbose=False,
                hidden_units=32, activation='relu', alpha=0, dropout_rate=0.2,
                learning_rate=0.001, momentum=0.9, weight_decay=0, loss='mse', beta=0.9):
     
@@ -178,6 +228,11 @@ def sasla_reg(X_pool, y_pool, X_test, y_test, num_iter=10, random_state=100, ver
     # n_samples = X_pool.shape[0]
     # n_reduce = n_samples * unlab // (num_iter-1)
     # excess = n_samples * unlab - n_reduce * (num_iter-1)
+
+    #compile model
+    model = create_regmodel(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, dropout_rate=dropout_rate,
+                            learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
+
     epochs = 200 // num_iter
     history = []
     tic = time()
@@ -186,11 +241,6 @@ def sasla_reg(X_pool, y_pool, X_test, y_test, num_iter=10, random_state=100, ver
         # update pool of labelled data
         X_labelled = X_pool[idx_labelled]
         y_labelled = y_pool[idx_labelled]
-
-        #compile model
-        model = create_regmodel(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, dropout_rate=dropout_rate,
-                                out_units=1, out_act='sigmoid', 
-                                learning_rate=learning_rate, momentum=momentum, weight_decay=weight_decay, loss=loss)
 
         # early_stopping = tf.keras.callbacks.EarlyStopping(
         #     monitor="val_loss",
@@ -219,21 +269,24 @@ def sasla_reg(X_pool, y_pool, X_test, y_test, num_iter=10, random_state=100, ver
             
         rmse = root_mean_squared_error(y_test, y_pred)
         mape = mean_absolute_percentage_error(y_test, y_pred)
+        mae = mean_absolute_error(y_test, y_pred)
         r2 = r2_score(y_test, y_pred)
         toc = time()
 
         if verbose:
             print(f"Iteration {i+1}: {idx_labelled.shape[0]} labelled instances\n"
-                  f"\tAccuracy = {acc}\n"
-                  f"\tmacro F1 = {f1}\n"
-                  f"\tAUC = {auc}\n"
+                  f"\t{train_loss[0]}\n"
+                  f"\t{train_loss[1]}\n"
+                  f"\tTest MAPE = {mape}\n"
             )
         history.append({'Labelled': idx_labelled.shape[0], 'cumulative epochs': epochs * (i + 1), 'Training loss': train_loss[-1], 
-                        'rmse': rmse, 'mape': mape, 'R_squared': r2, 'time': toc - tic}})
+                        'rmse': rmse, 'mape': mape, 'mae': mae, 'R_squared': r2, 'time': toc - tic})
 
         # determine instances that should be labelled
         if i < num_iter - 1:
             idx_labelled = sasla_sampling_reg(model, X_pool, activation, alpha, beta)
+            if len(idx_labelled) < (1 - unlab_size) *X_pool.shape[0]:
+                break
 
         # n_samples -= n_reduce
         # if i == 0:
