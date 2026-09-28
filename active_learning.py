@@ -72,45 +72,6 @@ def uncertainty_sampling(model, X_unlabelled, n_classes, n_samples):
         selected_indices = np.argsort(-entropy)[:n_samples]
     return selected_indices
 
-# def sasla_sampling(model, X_pool, n_targets, n_samples):
-#     S = np.zeros(shape=X_pool.shape[0])
-#     probabilities = model.predict(
-#         X_pool,
-#         verbose=0
-#     )
-#     hidden_model = tf.keras.Model(
-#         inputs=model.input,
-#         outputs=model.layers[0].output
-#     )
-    
-#     hidden_values = hidden_model(X_pool, training=False).numpy()
-    
-#     weights = model.get_weights()
-#     hidden_weights = weights[0]
-#     output_weights = weights[2]
-    
-#     for p in range(X_pool.shape[0]):
-#         # x_p = X_pool[p]
-#         S_p = np.zeros(shape=(n_targets, X_pool.shape[1]))
-#         for k in range(n_targets):
-#             o_pk = probabilities[p, k]
-#             odds = o_pk * (1 - o_pk)
-
-#             # S_pk = np.zeros(X_pool.shape[1])
-#             for i in range(X_pool.shape[1]):
-#                 total = 0
-#                 for j in range(hidden_weights.shape[1]):
-#                     h_j = hidden_values[p, j]
-#                     w_kj = output_weights[j, k]
-#                     w_ji = hidden_weights[i, j]
-#                     total += w_kj * w_ji * (1 - h_j) * h_j
-
-#                 S_p[k, i] = odds * total
-#         S[p] = np.max(S_p)
-
-#     selected_indices = np.argsort(-S)[:n_samples]
-#     return selected_indices
-
 def sasla_sampling(model, X_pool, activation, alpha, n_targets, beta):
     # Model outputs
     probabilities = model(X_pool, training=False).numpy()
@@ -209,12 +170,7 @@ def active_learning_bc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
         X_unlabelled = X_pool[idx_unlabelled]
         y_unlabelled = y_pool[idx_unlabelled]
 
-        # early_stopping = tf.keras.callbacks.EarlyStopping(
-        #     monitor="val_loss",
-        #     patience=5,
-        #     restore_best_weights=True
-        # )
-        
+
         # train model on labelled data
         fit_kwargs = {
             "epochs": epochs,
@@ -286,21 +242,10 @@ def active_learning_mc(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, un
         if i == num_iter - 2:
             n_samples = idx_unlabelled.shape[0]
 
-        # update pool of labelled data
-        # X_labelled = X_pool.iloc[idx_labelled]
-        # y_labelled = y_pool.iloc[idx_labelled]
-        # X_unlabelled = X_pool.iloc[idx_unlabelled]
-        # y_unlabelled = y_pool.iloc[idx_unlabelled]
         X_labelled = X_pool[idx_labelled]
         y_labelled = y_pool[idx_labelled]
         X_unlabelled = X_pool[idx_unlabelled]
         y_unlabelled = y_pool[idx_unlabelled]
-
-        # early_stopping = tf.keras.callbacks.EarlyStopping(
-        #     monitor="val_loss",
-        #     patience=5,
-        #     restore_best_weights=True
-        # )
 
         # train model on labelled data
         fit_kwargs = {
@@ -360,9 +305,6 @@ def sasla_bc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
     idx_labelled = indices.copy()
     
     input_dim = X_pool.shape[1]
-    # n_samples = X_pool.shape[0]
-    # n_reduce = np.ceil(n_samples * unlab_size) // (num_iter-1)
-    # excess = np.ceil(n_samples * unlab_size) - n_reduce * (num_iter-1)
     epochs = 200 // num_iter
 
     #compile model
@@ -413,11 +355,6 @@ def sasla_bc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
         history.append({'Labelled': idx_labelled.shape[0], 'cumulative epochs': epochs * (i + 1), 'Training loss': train_loss[-1], 
                         'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc, 'time': toc - tic})
 
-        # # reduce subset size
-        # n_samples -= n_reduce
-        # if i == 0:
-        #     n_samples -= excess
-
         # determine instances that should be labelled
         if i < num_iter - 1:
             idx_labelled = sasla_sampling(model, X_pool, activation, alpha, 1, beta)
@@ -434,9 +371,6 @@ def sasla_mc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
     idx_labelled = indices.copy()
 
     input_dim = X_pool.shape[1]
-    # n_samples = X_pool.shape[0]
-    # n_reduce = n_samples * unlab_size // (num_iter-1)
-    # excess = n_samples * unlab_size - n_reduce * (num_iter-1)
 
     # compile model
     model = create_model(input_dim=input_dim, hidden_units=hidden_units, activation=activation, alpha=alpha, out_units=out_units, out_act=out_act, 
@@ -492,11 +426,6 @@ def sasla_mc(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, random
             )
         history.append({'Labelled': idx_labelled.shape[0], 'cumulative epochs': epochs * (i + 1), 'Training loss': train_loss[-1],
                         'Accuracy': acc, 'macro F1': f1, 'ROC-AUC': auc, 'time': toc - tic})
-
-        # # reduce subset size
-        # n_samples -= n_reduce
-        # if i == 0:
-        #     n_samples -= excess
 
         # determine instances that should be labelled
         if i < num_iter - 1:

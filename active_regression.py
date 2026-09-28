@@ -58,18 +58,8 @@ def uncertainty_sampling_reg(model, X_unlabelled, n_samples):
         model(X_unlabelled, training=True).numpy().ravel()
         for _ in range(20)
     ])
-
-    # print("Predictions finite:", np.all(np.isfinite(predictions)))
-    # print("Prediction range:",
-    #       np.nanmin(predictions),
-    #       np.nanmax(predictions))
     
     uncertainty = np.var(predictions, axis=0)
-
-    # print("Uncertainty finite:", np.all(np.isfinite(uncertainty)))
-    # print("Uncertainty range:",
-    #       np.nanmin(uncertainty),
-    #       np.nanmax(uncertainty))
     
     selected_indices = np.argsort(-uncertainty)[:n_samples]
 
@@ -128,8 +118,6 @@ def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, u
     
     history = []
     tic = time()
-    # old_weights = None
-    # old_state = None
     for i in range(num_iter):
         if i == num_iter - 2:
             n_samples = idx_unlabelled.shape[0]
@@ -151,49 +139,9 @@ def active_learning_reg(X_pool, y_pool, X_test, y_test, sampling, num_iter=10, u
             verbose=0
         )
         train_loss = iter_hist.history['loss']
-        # print(train_loss)
-
-        # if not np.all(np.isfinite(train_loss)):
-
-        #     print("\nOPTIMIZER STATE BEFORE FIT")
-
-        #     for v in old_state:
-        #         arr = v.numpy()
-            
-        #         print(
-        #             v.name,
-        #             "finite =", np.all(np.isfinite(arr)),
-        #             "norm =", np.linalg.norm(arr),
-        #             "min =", np.min(arr),
-        #             "max =", np.max(arr)
-        #         )
     
-        #     print('BEFORE')
-        #     for j, w in enumerate(old_weights):
-        #         print(
-        #             f"weight {j}: "
-        #             f"finite={np.all(np.isfinite(w))}, "
-        #             f"norm={np.linalg.norm(w):.6f}, "
-        #             f"min={np.min(w):.6f}, "
-        #             f"max={np.max(w):.6f}"
-        #         )
-        #     print('\nAFTER')
-        #     for j, w in enumerate(model.get_weights()):
-        #         print(
-        #             f"weight {j}: finite={np.all(np.isfinite(w))}, "
-        #             f"min={np.min(w)}, max={np.max(w)}"
-        #         )
-
          # Evaluate
         y_pred = model(X_test, training=False).numpy().ravel()
-
-        # if not np.all(np.isfinite(y_pred)):
-        #     print(
-        #         "Predictions:",
-        #         np.all(np.isfinite(y_pred)),
-        #         np.min(y_pred),
-        #         np.max(y_pred)
-        #     )
             
         rmse = root_mean_squared_error(y_test, y_pred)
         mape = mean_absolute_percentage_error(y_test, y_pred)
@@ -241,12 +189,6 @@ def sasla_reg(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, rando
         # update pool of labelled data
         X_labelled = X_pool[idx_labelled]
         y_labelled = y_pool[idx_labelled]
-
-        # early_stopping = tf.keras.callbacks.EarlyStopping(
-        #     monitor="val_loss",
-        #     patience=5,
-        #     restore_best_weights=True
-        # )
         
         # train model on labelled data
         fit_kwargs = {
@@ -287,10 +229,6 @@ def sasla_reg(X_pool, y_pool, X_test, y_test, num_iter=10, unlab_size=0.9, rando
             idx_labelled = sasla_sampling_reg(model, X_pool, activation, alpha, beta)
             if len(idx_labelled) < (1 - unlab_size) *X_pool.shape[0]:
                 break
-
-        # n_samples -= n_reduce
-        # if i == 0:
-        #     n_samples -= excess
 
     return history
 
